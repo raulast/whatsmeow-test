@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Login QR</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            background-color: #f0f2f5;
+            margin: 0;
+        }
+        h1 {
+            color: #128c7e;
+        }
+        #qr-container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+        .status {
+            margin-top: 10px;
+            color: #555;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <h1>WhatsApp Login QR</h1>
+    <div id="qr-container">
+        <img id="qr-code" src="https://cdn-icons-png.flaticon.com/128/1288/1288278.png" alt="Waiting for QR code..." width="500" height="500" />
+    </div>
+    <div class="status" id="status">Connecting...</div>
+
+    <script>
+        const statusDiv = document.getElementById('status');
+        const img = document.getElementById('qr-code');
+
+        function connect() {
+            // Construct WebSocket URL dynamically based on current path
+            // Assumes current path is /{jid}
+            // WS path will be /{jid}/ws
+            
+            let path = window.location.pathname;
+            if (path.endsWith('/')) {
+                path = path.slice(0, -1);
+            }
+            
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = wsProtocol + '//' + window.location.host + path + '/ws';
+            
+            console.log("Connecting to WebSocket:", wsUrl);
+            const socket = new WebSocket(wsUrl);
+
+            socket.onopen = function() {
+                console.log("WebSocket connected");
+                statusDiv.innerText = "Connected. Waiting for QR...";
+            };
+
+            socket.onmessage = function(event) {
+                const code = event.data;
+                console.log("Received code len:", code.length);
+                const qrUrl = "https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=" + encodeURIComponent(code);
+                img.src = qrUrl;
+                statusDiv.innerText = "QR Code received";
+            };
+
+            socket.onclose = function(event) {
+                console.log("WebSocket closed", event);
+                statusDiv.innerText = "Disconnected. Reconnecting...";
+                setTimeout(connect, 3000); // Reconnect after 3 seconds
+            };
+
+            socket.onerror = function(error) {
+                console.log("WebSocket error", error);
+                statusDiv.innerText = "Connection error.";
+            };
+        }
+
+        connect();
+    </script>
+</body>
+</html>
