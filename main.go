@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"flag"
 	"fmt"
+	"html/template"
 	"os"
 	"os/signal"
 	"strings"
@@ -30,9 +31,9 @@ import (
 )
 
 var (
-	qrCodeChan = make(chan string)
-	wsConns    = make(map[*websocket.Conn]struct{})
-	wsConnsMu  sync.Mutex
+	qrCode    = ""
+	wsConns   = make(map[*websocket.Conn]struct{})
+	wsConnsMu sync.Mutex
 )
 
 func broadcastQR(code string) {
@@ -50,7 +51,12 @@ func broadcastQR(code string) {
 }
 
 func qrHandler(w http.ResponseWriter, r *http.Request) {
-	http.ServeFile(w, r, "qr.html")
+	type qrData struct {
+		Code string
+	}
+	qr := qrData{Code: "https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=" + qrCode}
+	tmpl := template.Must(template.ParseFiles("qr.html"))
+	tmpl.Execute(w, qr)
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
@@ -309,6 +315,7 @@ func main() {
 				// or just manually `echo 2@... | qrencode -t ansiutf8` in a terminal
 				fmt.Println("QR code:", evt.Code)
 				printQR(evt.Code)
+				qrCode = evt.Code
 				go broadcastQR(evt.Code)
 			} else {
 				fmt.Println("Login event:", evt.Event)
