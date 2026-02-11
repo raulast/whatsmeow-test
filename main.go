@@ -22,6 +22,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"net/http"
+	"net/url"
 	"sync"
 
 	"github.com/coder/websocket"
@@ -54,7 +55,15 @@ func qrHandler(w http.ResponseWriter, r *http.Request) {
 	type qrData struct {
 		Code string
 	}
-	qr := qrData{Code: "https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=" + qrCode}
+	//url encode qrCode
+	qr := qrData{
+		Code: qrCode,
+	}
+	if !strings.HasPrefix(qrCode, "http") {
+		qr.Code = url.QueryEscape(qrCode)
+		qr.Code = "https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=" + qr.Code
+	}
+	fmt.Println("QR Code:", qr)
 	tmpl := template.Must(template.ParseFiles("qr.html"))
 	tmpl.Execute(w, qr)
 }
@@ -80,11 +89,34 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	wsConnsMu.Unlock()
 }
 
-func eventHandler(client *whatsmeow.Client, evt interface{}) {
+func eventHandler(client *whatsmeow.Client, evt interface{}, JID string) {
 	switch v := evt.(type) {
+	case *events.Disconnected:
+		fmt.Println("Disconnected!")
+		os.Exit(9)
+	case *events.LoggedOut:
+		fmt.Println("logout!")
+		os.Exit(9)
 	case *events.Connected:
-		fmt.Println("Connected to WhatsApp")
-
+		RJID := client.Store.GetJID()
+		fmt.Println("RJID:", RJID)
+		fmt.Println("JID:", JID)
+		if RJID.User != JID {
+			fmt.Println("JID Mismatch:", RJID, JID)
+			qrCode = "https://cdn-icons-png.flaticon.com/128/1113/1113253.png"
+			broadcastQR(qrCode)
+			fmt.Println("Disconnecting...")
+			err := client.Logout(context.Background())
+			if err != nil {
+				fmt.Println("Error logging out:", err)
+			}
+			os.Exit(9)
+		} else {
+			qrCode = "https://cdn-icons-png.flaticon.com/128/190/190411.png"
+			broadcastQR(qrCode)
+			fmt.Println("JID Match:", RJID, JID)
+			fmt.Println("Connected!")
+		}
 	case *events.Message:
 		message := v.Message.GetConversation()
 		fmt.Println("Received a message!", message)
@@ -228,6 +260,10 @@ func main() {
 	if len(os.Args) > 1 {
 		JID = os.Args[1]
 	}
+	if JID == "" {
+		fmt.Println("No JID provided")
+		return
+	}
 	var port string
 	var db string
 	// -p --port
@@ -246,17 +282,13 @@ func main() {
 	}
 	// If you want multiple sessions, remember their JIDs and use .GetDevice(jid) or .GetAllDevices() instead.
 	var deviceStore *store.Device
-	if JID != "" {
-		jjid, err := getDeviceJIDbyPhone(JID, db)
-		if err != nil {
-			fmt.Println("Error getting device JID:", err)
-			panic(err)
-		}
-		fmt.Println("CURRENT-JID:", jjid)
-		deviceStore, err = container.GetDevice(ctx, jjid)
-	} else {
-		deviceStore, err = container.GetFirstDevice(ctx)
+	jjid, err := getDeviceJIDbyPhone(JID, db)
+	if err != nil {
+		fmt.Println("Error getting device JID:", err)
+		panic(err)
 	}
+	fmt.Println("CURRENT-JID:", jjid)
+	deviceStore, err = container.GetDevice(ctx, jjid)
 	if err != nil {
 		panic(err)
 	}
@@ -298,7 +330,7 @@ func main() {
 	clientLog := waLog.Stdout("Client", "DEBUG", true)
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 	client.AddEventHandler(func(evt interface{}) {
-		eventHandler(client, evt)
+		eventHandler(client, evt, JID)
 	})
 
 	if client.Store.ID == nil {
