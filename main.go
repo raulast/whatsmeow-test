@@ -7,8 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
+	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -92,9 +96,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 func eventHandler(client *whatsmeow.Client, evt interface{}, JID string) {
 	switch v := evt.(type) {
 	case *events.Disconnected:
+		client.Store.Delete(context.Background())
 		fmt.Println("Disconnected!")
 		os.Exit(9)
 	case *events.LoggedOut:
+		client.Store.Delete(context.Background())
 		fmt.Println("logout!")
 		os.Exit(9)
 	case *events.Connected:
@@ -116,6 +122,7 @@ func eventHandler(client *whatsmeow.Client, evt interface{}, JID string) {
 			broadcastQR(qrCode)
 			fmt.Println("JID Match:", RJID, JID)
 			fmt.Println("Connected!")
+			_, _ = sendTextMessage(client, JID, "Tamo Activo!")
 		}
 	case *events.Message:
 		message := v.Message.GetConversation()
@@ -179,13 +186,14 @@ func sendPDFMessage(client *whatsmeow.Client, phone string, message string, pdfP
 	}
 	return err, resp
 }
-func test(client *whatsmeow.Client, tester string) (error, whatsmeow.SendResponse) {
+func test(client *whatsmeow.Client, tester string, rowi int) (error, whatsmeow.SendResponse) {
 	// read csv file ./masivo/invitados.csv
 	file, err := os.Open("./masivo/invitados.csv")
 	if err != nil {
 		fmt.Println("Error opening file:", err)
 		return err, whatsmeow.SendResponse{}
 	}
+	defer file.Close()
 	csvReader := csv.NewReader(file)
 	csvReader.FieldsPerRecord = 5
 	csvReader.LazyQuotes = true
@@ -196,31 +204,46 @@ func test(client *whatsmeow.Client, tester string) (error, whatsmeow.SendRespons
 		return err, whatsmeow.SendResponse{}
 	}
 	thumbnailPath := "./masivo/thumbnail.jpeg"
-	row := data[1]
+	messagePath := "./masivo/message.txt"
+	columNames := data[0]
+	template, err := os.ReadFile(messagePath)
+	if err != nil {
+		fmt.Println("Error reading file:", err)
+		return sendTextMessage(client, tester, "Error al leer el archivo de mensaje")
+	}
+	// aca empezaria el bucle para recorrer el csv
+	row := data[rowi]
 	fmt.Println(row)
 	pdfPath := "./masivo/invitaciones/invitaciones-" + row[0] + ".pdf"
-	PhoneName := row[4]
 	//phone := row[3]
-	template := "Hola %s, te invitamos a nuestra boda, por favor confirma tu asistencia antes del 15 de marzo, puedes hacerlo aqui https://boda.ransato.com/"
-	message := fmt.Sprintf(template, PhoneName)
+	message := string(template)
+	for i, columName := range columNames {
+		message = strings.ReplaceAll(message, "{{"+columName+"}}", row[i])
+	}
 	sendPDFMessage(client, tester, message, pdfPath, thumbnailPath)
-
-	// for _, row := range data {
-	// 	fmt.Println(row)
-	// }
-	defer file.Close()
 
 	return nil, whatsmeow.SendResponse{}
 }
 
 func commandHandler(client *whatsmeow.Client, evt *events.Message) {
 
-	switch message := evt.Message.GetConversation(); message {
-	case "!ping":
+	switch message := evt.Message.GetConversation(); true {
+	case message == "!ping":
 		_, resp := sendTextMessage(client, evt.Info.Chat.User, "!pong")
 		fmt.Println("!pong sent:", resp)
-	case "!test":
-		err, resp := test(client, evt.Info.Chat.User)
+	case strings.HasPrefix(message, "!test"):
+		//split message by space
+		messageSplit := strings.Split(message, " ")
+		var rowi int = 1
+		var err error
+		if len(messageSplit) == 2 {
+			rowi, err = strconv.Atoi(messageSplit[1])
+			if err != nil {
+				_, _ = sendTextMessage(client, evt.Info.Chat.User, "Error: !test requires a valid row number")
+				return
+			}
+		}
+		err, resp := test(client, evt.Info.Chat.User, rowi)
 		if err != nil {
 			fmt.Println("Error sending message:", err)
 		}
@@ -228,7 +251,24 @@ func commandHandler(client *whatsmeow.Client, evt *events.Message) {
 	}
 
 }
+func openBrowser(url string) {
+	var err error
 
+	switch runtime.GOOS {
+	case "linux":
+		err = exec.Command("xdg-open", url).Start()
+	case "windows":
+		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	case "darwin":
+		err = exec.Command("open", url).Start()
+	default:
+		log.Fatal("Sistema operativo no soportado")
+	}
+
+	if err != nil {
+		log.Fatal(err)
+	}
+}
 func getDeviceJIDbyPhone(phone string, sqlname string) (types.JID, error) {
 	db, err := sql.Open("sqlite3", "file:"+sqlname+".db?_foreign_keys=on")
 	if err != nil {
@@ -266,12 +306,16 @@ func main() {
 	}
 	var port string
 	var db string
+	var standalone bool
 	// -p --port
 	flag.StringVar(&port, "p", "8080", "Port to listen on")
 	flag.StringVar(&port, "port", "8080", "Port to listen on")
 	// -db --database-name
 	flag.StringVar(&db, "db", "sessions", "Database name")
 	flag.StringVar(&db, "database-name", "sessions", "Database name")
+	//-s --stand-alone
+	flag.BoolVar(&standalone, "s", false, "Standalone mode")
+	flag.BoolVar(&standalone, "stand-alone", false, "Standalone mode")
 	flag.Parse()
 
 	dbLog := waLog.Stdout("Database", "DEBUG", true)
@@ -339,6 +383,9 @@ func main() {
 		err = client.Connect()
 		if err != nil {
 			panic(err)
+		}
+		if !standalone {
+			openBrowser("http://localhost:" + port + "/" + JID)
 		}
 		for evt := range qrChan {
 			if evt.Event == "code" {
