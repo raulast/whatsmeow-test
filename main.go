@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -122,7 +123,6 @@ func eventHandler(client *whatsmeow.Client, evt interface{}, JID string) {
 			broadcastQR(qrCode)
 			fmt.Println("JID Match:", RJID, JID)
 			fmt.Println("Connected!")
-			_, _ = sendTextMessage(client, JID, "Tamo Activo!")
 		}
 	case *events.Message:
 		message := v.Message.GetConversation()
@@ -138,10 +138,35 @@ func printQR(code string) {
 	qrterminal.GenerateHalfBlock(code, qrterminal.L, os.Stdout)
 }
 
+func getEventPhone(evt *events.Message) string {
+	sender := evt.Info.Sender.String()
+	senderAlt := evt.Info.SenderAlt.String()
+	ChatJID := evt.Info.Chat.String()
+	var phone string
+
+	// if include @s.whatsapp.net and not include ':'
+	if strings.Contains(sender, "@s.whatsapp.net") && !strings.Contains(sender, ":") {
+		phone = strings.Split(sender, "@")[0]
+	} else if strings.Contains(senderAlt, "@s.whatsapp.net") && !strings.Contains(senderAlt, ":") {
+		phone = strings.Split(senderAlt, "@")[0]
+	} else if strings.Contains(ChatJID, "@s.whatsapp.net") && !strings.Contains(ChatJID, ":") {
+		phone = strings.Split(ChatJID, "@")[0]
+	}
+	if phone == "" {
+		fmt.Println("Phone not found")
+	}
+
+	return phone
+}
+
 func sendTextMessage(client *whatsmeow.Client, phone string, message string) (error, whatsmeow.SendResponse) {
 
 	phoneJID := types.JID{Server: "s.whatsapp.net", User: phone}
-	resp, err := client.SendMessage(context.Background(), phoneJID, &waE2E.Message{Conversation: proto.String(message)})
+	ctx := context.Background()
+	client.SendPresence(ctx, types.PresenceAvailable)
+	time.Sleep(1 * time.Second)
+	fmt.Println("Sending message to:", phoneJID, "message:", message)
+	resp, err := client.SendMessage(ctx, phoneJID, &waE2E.Message{Conversation: proto.String(message)})
 	if err != nil {
 		fmt.Println("Error sending message:", err)
 	}
@@ -165,7 +190,10 @@ func sendPDFMessage(client *whatsmeow.Client, phone string, message string, pdfP
 	thumbHeight := uint32(480)
 
 	phoneJID := types.JID{Server: "s.whatsapp.net", User: phone}
-	resp, err := client.SendMessage(context.Background(), phoneJID, &waE2E.Message{
+	ctx := context.Background()
+	client.SendPresence(ctx, types.PresenceAvailable)
+	time.Sleep(1 * time.Second)
+	resp, err := client.SendMessage(ctx, phoneJID, &waE2E.Message{
 		DocumentMessage: &waE2E.DocumentMessage{
 			URL:             &upload.URL,
 			Mimetype:        proto.String("application/pdf"), // Specify the correct MIME type
@@ -186,7 +214,7 @@ func sendPDFMessage(client *whatsmeow.Client, phone string, message string, pdfP
 	}
 	return err, resp
 }
-func test(client *whatsmeow.Client, tester string, rowi int) (error, whatsmeow.SendResponse) {
+func sendMasivo(client *whatsmeow.Client, tester string, rowi int, test bool) (error, whatsmeow.SendResponse) {
 	// read csv file ./masivo/invitados.csv
 	file, err := os.Open("./masivo/invitados.csv")
 	if err != nil {
@@ -195,9 +223,8 @@ func test(client *whatsmeow.Client, tester string, rowi int) (error, whatsmeow.S
 	}
 	defer file.Close()
 	csvReader := csv.NewReader(file)
-	csvReader.FieldsPerRecord = 5
+	csvReader.FieldsPerRecord = 6
 	csvReader.LazyQuotes = true
-	csvReader.Comma = ';'
 	data, err := csvReader.ReadAll()
 	if err != nil {
 		fmt.Println("Error reading CSV:", err)
@@ -209,27 +236,50 @@ func test(client *whatsmeow.Client, tester string, rowi int) (error, whatsmeow.S
 	template, err := os.ReadFile(messagePath)
 	if err != nil {
 		fmt.Println("Error reading file:", err)
-		return sendTextMessage(client, tester, "Error al leer el archivo de mensaje")
+		return err, whatsmeow.SendResponse{}
 	}
 	// aca empezaria el bucle para recorrer el csv
 	row := data[rowi]
 	fmt.Println(row)
 	pdfPath := "./masivo/invitaciones/invitaciones-" + row[0] + ".pdf"
-	//phone := row[3]
+	phone := tester
+	if !test {
+		phone = row[3]
+	}
 	message := string(template)
 	for i, columName := range columNames {
 		message = strings.ReplaceAll(message, "{{"+columName+"}}", row[i])
 	}
-	sendPDFMessage(client, tester, message, pdfPath, thumbnailPath)
+	if row[5] == "pendiente" || test {
+		err, resp := sendPDFMessage(client, phone, message, pdfPath, thumbnailPath)
+		if err != nil {
+			fmt.Println("Error sending message:", err)
+		}
+		fmt.Println("!pong sent:", resp)
+		if !test {
+			//update csv file
+			data[rowi][5] = "enviado"
+			file, err := os.Create("./masivo/invitados.csv")
+			if err != nil {
+				fmt.Println("Error opening file:", err)
+				return err, whatsmeow.SendResponse{}
+			}
+			defer file.Close()
+			csvWriter := csv.NewWriter(file)
+			csvWriter.WriteAll(data)
+			csvWriter.Flush()
+		}
+	}
 
 	return nil, whatsmeow.SendResponse{}
 }
 
 func commandHandler(client *whatsmeow.Client, evt *events.Message) {
 
-	switch message := evt.Message.GetConversation(); true {
+	message := evt.Message.GetConversation()
+	switch {
 	case message == "!ping":
-		_, resp := sendTextMessage(client, evt.Info.Chat.User, "!pong")
+		_, resp := sendTextMessage(client, getEventPhone(evt), "!pong")
 		fmt.Println("!pong sent:", resp)
 	case strings.HasPrefix(message, "!test"):
 		//split message by space
@@ -239,11 +289,15 @@ func commandHandler(client *whatsmeow.Client, evt *events.Message) {
 		if len(messageSplit) == 2 {
 			rowi, err = strconv.Atoi(messageSplit[1])
 			if err != nil {
-				_, _ = sendTextMessage(client, evt.Info.Chat.User, "Error: !test requires a valid row number")
+				err, resp := sendTextMessage(client, getEventPhone(evt), "Error: !test requires a valid row number")
+				if err != nil {
+					fmt.Println("Error sending message:", err)
+				}
+				fmt.Println("!test sent:", resp)
 				return
 			}
 		}
-		err, resp := test(client, evt.Info.Chat.User, rowi)
+		err, resp := sendMasivo(client, getEventPhone(evt), rowi, true)
 		if err != nil {
 			fmt.Println("Error sending message:", err)
 		}
@@ -296,14 +350,6 @@ func main() {
 	// |------------------------------------------------------------------------------------------------------|
 
 	var JID string
-
-	if len(os.Args) > 1 {
-		JID = os.Args[1]
-	}
-	if JID == "" {
-		fmt.Println("No JID provided")
-		return
-	}
 	var port string
 	var db string
 	var standalone bool
@@ -317,6 +363,12 @@ func main() {
 	flag.BoolVar(&standalone, "s", false, "Standalone mode")
 	flag.BoolVar(&standalone, "stand-alone", false, "Standalone mode")
 	flag.Parse()
+
+	JID = flag.Arg(0)
+	if JID == "" {
+		fmt.Println("No JID provided")
+		return
+	}
 
 	dbLog := waLog.Stdout("Database", "DEBUG", true)
 	ctx := context.Background()
@@ -359,13 +411,12 @@ func main() {
 			pathJID = "new"
 		}
 
-		fmt.Printf("Starting QR Web Server at http://localhost:8080/%s\n", pathJID)
+		fmt.Printf("Starting QR Web Server at http://localhost:%s/%s\n", port, pathJID)
 
 		mux := http.NewServeMux()
 		mux.HandleFunc(fmt.Sprintf("/%s", pathJID), qrHandler)
 		mux.HandleFunc(fmt.Sprintf("/%s/ws", pathJID), wsHandler)
 
-		port := "8080"
 		if err := http.ListenAndServe(":"+port, mux); err != nil {
 			fmt.Println("Error starting HTTP server:", err)
 		}
